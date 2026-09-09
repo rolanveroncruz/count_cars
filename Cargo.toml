@@ -1,0 +1,17 @@
+[package]
+name = "count_cars"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+tokio = {version="1.53.1", features=["full"]}
+serde = {version="1.0.229", features = ["derive"]}
+serde_json = "1.0.151"
+opencv="0.100.1"
+rusqlite = "0.40.1"
+tokio-stream = { version="0.1.19", features = ["sync"] }
+chrono = "0.4.45"
+ort = "2.0.0-rc.13"
+ndarray = "0.17.2"
+trackforge = "0.3.0"
