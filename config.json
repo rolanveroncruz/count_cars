@@ -1,0 +1,6 @@
+{
+  "min_box_area": 3000.0,
+  "confidence": 0.45,
+  "alpr_trigger_area": 25000.0,
+  "gate_line_y": 600
+}
