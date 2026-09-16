@@ -1,4 +1,6 @@
+ #![allow(dead_code)]
 pub mod rpicam_vid;
+
 pub mod video_file;
 
 use opencv::core::Mat;

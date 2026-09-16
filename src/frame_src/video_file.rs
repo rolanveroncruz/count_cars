@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 use opencv::core::Mat;
 use opencv::videoio::{self, VideoCaptureTrait, VideoCaptureTraitConst};
 use std::time::{Instant, Duration};
@@ -17,7 +18,7 @@ pub struct VideoFileSource {
 impl VideoFileSource {
     pub fn new(file_path: &str) -> Result<Self, String> {
         // Initialize OpenCV VideoCapture for the file
-        let capture = videoio::VideoCapture::from_file(file_path, videoio::CAP_ANY)
+        let capture = videoio::VideoCapture::from_file(file_path, videoio::CAP_FFMPEG)
             .map_err(|e| format!("Failed to open video file {}: {:?}", file_path, e))?;
 
         // Extract native metadata from the video file
