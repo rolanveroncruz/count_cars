@@ -166,10 +166,11 @@ impl Hailo8Manager {
             // 7. Build output vstream params (HailoRT 4.23.0 API)
             let mut output_params: [hailo_output_vstream_params_by_name_t; HAILO_MAX_STREAMS_COUNT as usize] = std::mem::zeroed();
             let mut output_params_count: usize = HAILO_MAX_STREAMS_COUNT as usize;
+
             if hailo_make_output_vstream_params(
                 network_group,
-                true,
-                HAILO_FORMAT_TYPE_AUTO,
+                false,
+                HAILO_FORMAT_TYPE_FLOAT32,
                 output_params.as_mut_ptr(),
                 &mut output_params_count,
             ) != HAILO_SUCCESS {
@@ -202,9 +203,19 @@ impl Hailo8Manager {
                 panic!("Failed to get vehicle input vstream frame size");
             }
             input_size = expected_in_size;
+
             is_nms = false;
+
             for i in 0..d2h_infos.len(){
-                if d2h_infos[i].format.order == HAILO_FORMAT_ORDER_HAILO_NMS {
+                let order = d2h_infos[i].format.order;
+
+                match order{
+                    HAILO_FORMAT_ORDER_HAILO_NMS => {println!("Vehicle Output {} Format:LEGACY_NMS", i);}
+                    HAILO_FORMAT_ORDER_HAILO_NMS_BY_CLASS => println!("Vehicle Output {} Format: NMS_BY_CLASS", i),
+                    HAILO_FORMAT_ORDER_HAILO_NMS_BY_SCORE => println!("Vehicle Output {} Format: NMS_BY_SCORE", i),
+                    _ => println!("Vehicle Output {} Format: RAW TENSOR (Enum ID: {})", i, order),
+                }
+                if order == HAILO_FORMAT_ORDER_HAILO_NMS_BY_CLASS{
                     is_nms = true;
                 }
                 let mut expected_out_size:usize = 0;
@@ -213,6 +224,7 @@ impl Hailo8Manager {
                 }
                 output_sizes.push(expected_out_size);
             }
+
             println!("Vehicle input size: {}, input_size, NMS output: {}", input_size, is_nms);
         } // unsafe
 
@@ -235,6 +247,7 @@ impl Hailo8Manager {
 impl Drop for Hailo8Manager {
     fn drop(&mut self) {
         unsafe {
+
             // Release vehicle pipeline vstreams
             // Release input vstreams (batch API)
             if !self.vehicle_input_vstream.is_null() {
@@ -287,10 +300,33 @@ impl CountCarsIntelligence for Hailo8Manager {
             &mut rgb_frame,
             opencv::imgproc::COLOR_BGR2RGB,
         );
+        println!("Inference frame: {}x{} channels={} bytes={}",
+        rgb_frame.cols(),
+        rgb_frame.rows(),
+        rgb_frame.channels(),
+        rgb_frame.data_bytes().unwrap().len()
+        );
         // ==========================================
         // 2. EXTRACT BYTES AND RUN INFERENCE
         // ==========================================
         if let Ok(frame_data) = rgb_frame.data_bytes() {
+            println!(
+                "Input: {}x{}, channels={}, bytes={}",
+                rgb_frame.cols(),
+                rgb_frame.rows(),
+                rgb_frame.channels(),
+                frame_data.len()
+            );
+
+            let min = *frame_data.iter().min().unwrap();
+            let max = *frame_data.iter().max().unwrap();
+            let sum: u64 = frame_data.iter().map(|&x| x as u64).sum();
+            let mean = sum as f64 / frame_data.len() as f64;
+
+            println!(
+                "Input statistics: min={}, max={}, mean={:.2}",
+                min, max, mean
+            );
             unsafe{
                 let status = hailo_vstream_write_raw_buffer(
                     self.vehicle_input_vstream,
@@ -323,6 +359,37 @@ impl CountCarsIntelligence for Hailo8Manager {
                     output_buf.as_mut_ptr() as *mut std::ffi::c_void,
                     buf_size,
                 );
+                let float_count = output_buf.len() / size_of::<f32>();
+
+                let output_floats = unsafe {
+                    std::slice::from_raw_parts(
+                        output_buf.as_ptr() as *const f32,
+                        float_count,
+                    )
+                };
+
+                let mut max_value = f32::NEG_INFINITY;
+                let mut min_value = f32::INFINITY;
+                let mut nonzero = 0usize;
+
+                for &v in output_floats {
+                    if v != 0.0 {
+                        nonzero += 1;
+                    }
+                    max_value = max_value.max(v);
+                    min_value = min_value.min(v);
+                }
+
+                println!(
+                    "NMS raw output: floats={} nonzero={} min={} max={}",
+                    float_count, nonzero, min_value, max_value
+                );
+
+                println!(
+                    "NMS first 32 floats: {:?}",
+                    &output_floats[..32.min(output_floats.len())]
+                );
+                println!("in detect_vehicles(): Vehicle output {}: {} bytes", i, output_buf.len());
                 if status != HAILO_SUCCESS{
                     eprintln!("Hailo output read failed on vstream {}:{}", i, status);
                     continue;
@@ -336,8 +403,9 @@ impl CountCarsIntelligence for Hailo8Manager {
                 parse_nms_output(&output_buf, orig_w, orig_h, &mut objects);
             }
         }
+        println!("in detect_vehicles(): parsed {} objects", objects.len());
         objects
-    }
+    } // detect_vehicles()
 
     fn locate_plate(&mut self, cropped_vehicle: &Mat) -> Option<TrackedObject> {
         if cropped_vehicle.empty() { return None; }
@@ -349,49 +417,148 @@ impl CountCarsIntelligence for Hailo8Manager {
         todo!()
     }
 }
+fn parse_nms_output(
+    buffer: &[u8],
+    orig_w: f32,
+    orig_h: f32,
+    objects: &mut Vec<TrackedObject>,
+) {
+    // HAILO_FORMAT_ORDER_HAILO_NMS_BY_CLASS layout:
+    //
+    // For each class:
+    //
+    //   struct (packed) {
+    //       float32_t bbox_count;
+    //       hailo_bbox_float32_t bbox[bbox_count];
+    //   };
+    //
+    // Each bbox contains:
+    //
+    //   y_min, x_min, y_max, x_max, score
+    //
+    // Each value is a float32 (20 bytes per bbox).
+    //
+    // IMPORTANT:
+    // There are not max_bboxes_per_class entries stored for every
+    // class. The buffer contains only bbox_count actual entries.
 
-fn parse_nms_output(buffer: &[u8], orig_w: f32, orig_h: f32, objects: &mut Vec<TrackedObject>) {
-    let det_size = size_of::<hailo_detection_t>();
-    let mut offset = 0;
-    let mut obj_id: usize = 0;
-    let mut class_id: usize = 0;
+    let num_classes = 80; // COCO
 
-    while offset + 2 <= buffer.len() {
-        //Read the bbox count for this class
-        let bbox_count = u16::from_le_bytes([buffer[offset], buffer[offset + 1]]);
-        offset += 2;
+    let mut obj_id = 0;
+    let mut offset = 0usize;
 
+    for class_id in 0..num_classes {
+        // Need at least 4 bytes for bbox_count.
+        if offset + 4 > buffer.len() {
+            break;
+        }
+
+        // bbox_count is a float32.
+        let bbox_count = f32::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+        ]) as usize;
+
+        offset += 4;
+
+        if class_id < 10 {
+            println!(
+                "NMS class {} ({}) count={}",
+                class_id,
+                COCO_NAMES.get(class_id).unwrap_or(&"unknown"),
+                bbox_count
+            );
+        }
+
+        let class_name = COCO_NAMES
+            .get(class_id)
+            .unwrap_or(&"unknown")
+            .to_string();
+
+        // Each bbox is:
+        //
+        // y_min: 4 bytes
+        // x_min: 4 bytes
+        // y_max: 4 bytes
+        // x_max: 4 bytes
+        // score: 4 bytes
+        //
+        // = 20 bytes
         for _ in 0..bbox_count {
-            if offset + det_size > buffer.len() {
-                break;
+            if offset + 20 > buffer.len() {
+                println!(
+                    "WARNING: NMS buffer ended while parsing class {} \
+                     (wanted bbox at offset {}, buffer size {})",
+                    class_id,
+                    offset,
+                    buffer.len()
+                );
+                return;
             }
-            let det: hailo_detection_t = unsafe {
-                ptr::read_unaligned(buffer.as_ptr().add(offset) as *const hailo_detection_t)
-            };
-            offset += det_size;
 
-            let class_name = COCO_NAMES
-                .get(det.class_id as usize)
-                .unwrap_or(&"unknown")
-                .to_string();
+            let y_min = f32::from_le_bytes([
+                buffer[offset],
+                buffer[offset + 1],
+                buffer[offset + 2],
+                buffer[offset + 3],
+            ]);
 
-            let x = (det.x_min * orig_w) as i32;
-            let y = (det.y_min * orig_h) as i32;
-            let w = ((det.x_max - det.x_min) * orig_w) as i32;
-            let h = ((det.y_max - det.y_min) * orig_h) as i32;
+            let x_min = f32::from_le_bytes([
+                buffer[offset + 4],
+                buffer[offset + 5],
+                buffer[offset + 6],
+                buffer[offset + 7],
+            ]);
+
+            let y_max = f32::from_le_bytes([
+                buffer[offset + 8],
+                buffer[offset + 9],
+                buffer[offset + 10],
+                buffer[offset + 11],
+            ]);
+
+            let x_max = f32::from_le_bytes([
+                buffer[offset + 12],
+                buffer[offset + 13],
+                buffer[offset + 14],
+                buffer[offset + 15],
+            ]);
+
+            let score = f32::from_le_bytes([
+                buffer[offset + 16],
+                buffer[offset + 17],
+                buffer[offset + 18],
+                buffer[offset + 19],
+            ]);
+
+            offset += 20;
+
+            let x = (x_min * orig_w) as i32;
+            let y = (y_min * orig_h) as i32;
+            let w = ((x_max - x_min) * orig_w) as i32;
+            let h = ((y_max - y_min) * orig_h) as i32;
 
             objects.push(TrackedObject {
                 id: obj_id,
-                class_id: det.class_id as usize,
-                class_name,
-                confidence: det.score,
+                class_id,
+                class_name: class_name.clone(),
+                confidence: score,
                 x,
                 y,
                 width: w,
                 height: h,
             });
+
             obj_id += 1;
         }
-        class_id += 1;
     }
+
+    println!(
+        "NMS parser: parsed {} objects, consumed {} / {} bytes",
+        obj_id,
+        offset,
+        buffer.len()
+    );
 }

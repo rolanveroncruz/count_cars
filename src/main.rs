@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1e. Setup Hailo8Manager
     let hailo8_manager = Arc::new(Mutex::new(inference::hailo8::Hailo8Manager::new(
-        "src/inference/models/yolo26n.hef",
+        "src/inference/models/yolov8n.hef",
           "src/inference/models/tiny_yolov4_license_plates.hef",
            "src/inference/models/lprnet.hef",
     )));
