@@ -153,22 +153,22 @@ pub fn run_camera_loop<F: FrameSource>(
             };
 
             process_vehicle_object(&mut frame, &vehicle, &current_config, vision_system.clone());
+        }
 
-            // E. Send the frame to Web Server Broadcast Hub
-            let mut encoded_buf = Vector::<u8>::new();
-            let mut params = Vector::<i32>::new(); // Default compression params
-            params.push(imgcodecs::IMWRITE_JPEG_QUALITY);
-            params.push(75);
-            if imgcodecs::imencode(".jpg", &frame, &mut encoded_buf, &params).unwrap_or(false) {
-                let _ = stream_tx_cam1.send(encoded_buf.to_vec());
-            }
+        // E. Send the frame to Web Server Broadcast Hub
+        let mut encoded_buf = Vector::<u8>::new();
+        let mut params = Vector::<i32>::new(); // Default compression params
+        params.push(imgcodecs::IMWRITE_JPEG_QUALITY);
+        params.push(75);
+        if imgcodecs::imencode(".jpg", &frame, &mut encoded_buf, &params).unwrap_or(false) {
+            let _ = stream_tx_cam1.send(encoded_buf.to_vec());
+        }
 
-            // F. Non-blocking cooldown logic for ALPR
-            if is_alpr_active {
-                if last_alpr_trigger.elapsed() >= Duration::from_secs(3) {
-                    is_alpr_active = false;
-                    println!("Camera 1: ALPR Cooldown finished.");
-                }
+        // F. Non-blocking cooldown logic for ALPR
+        if is_alpr_active {
+            if last_alpr_trigger.elapsed() >= Duration::from_secs(3) {
+                is_alpr_active = false;
+                println!("Camera 1: ALPR Cooldown finished.");
             }
         }
     }
