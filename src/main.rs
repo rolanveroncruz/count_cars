@@ -1,3 +1,5 @@
+extern crate core;
+
 pub mod inference;
 mod config;
 mod alpr;

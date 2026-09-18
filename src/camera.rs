@@ -1,4 +1,6 @@
 #![allow(unused)]
+
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 
@@ -9,11 +11,14 @@ use opencv::{
     imgcodecs,
 };
 
+use trackforge::trackers::byte_track::ByteTrack;
+
 use crate::alpr::GateEvent;
 use crate::config::AppConfig;
 use crate::frame_src::FrameSource;
+use crate::inference;
+use crate::inference::hailo8::COCO_NAMES;
 use crate::inference::{CountCarsIntelligence, TrackedObject};
-
 
 //************************
 //*
@@ -29,15 +34,17 @@ use crate::inference::{CountCarsIntelligence, TrackedObject};
 //     5. Send frame for streaming and archiving
 //
 //*************************
-pub fn run_camera_loop<A: CountCarsIntelligence, F: FrameSource>(
+pub fn run_camera_loop<F: FrameSource>(
     mut rx_config: watch::Receiver<AppConfig>,
     gate_tx_cam1: broadcast::Sender<GateEvent>,
     stream_tx_cam1: broadcast::Sender<Vec<u8>>,
-    mut vision_system: A,
+    mut vision_system: Arc<Mutex<inference::hailo8::Hailo8Manager>>,
     mut video_source: F,
 ) {
     let mut is_alpr_active = false;
     let mut last_alpr_trigger = Instant::now() - Duration::from_secs(3);
+
+    let mut tracker = ByteTrack::new(0.5, 30, 0.8, 0.6);
 
     println!("Starting High-Speed Camera/YOLO Loop...");
 
@@ -101,32 +108,67 @@ pub fn run_camera_loop<A: CountCarsIntelligence, F: FrameSource>(
         );
 
         // D. Run YOLO inference
-        let should_run_inference = frame_count % 1 == 0;
+        let should_run_inference = frame_count % 3 == 0;
+        let mut trackforge_detections = Vec::new();
+
         if should_run_inference {
             let objects = vision_system.detect_vehicles(&frame);
-            write_num_objects_detected_to_frame(&mut frame, objects.len());
 
             for obj in &objects {
-                if is_a_vehicle(obj) {
-                    process_vehicle_object(&mut frame, obj, &current_config);
+                let area = (obj.width * obj.height) as f64;
+                if area >= current_config.min_box_area {
+                    let dummy_class_id = 2_i64;
+                    trackforge_detections.push((
+                        [
+                            obj.x as f32,
+                            obj.y as f32,
+                            obj.width as f32,
+                            obj.height as f32,
+                        ],
+                        obj.confidence,
+                        obj.class_id as i64,
+                    ));
                 }
             }
         }
+        let active_tracks = if should_run_inference {
+            tracker.update(trackforge_detections)
+        } else {
+            tracker.update(Vec::new())
+        };
 
-        // E. Send the frame to Web Server Broadcast Hub
-        let mut encoded_buf = Vector::<u8>::new();
-        let mut params = Vector::<i32>::new(); // Default compression params
-        params.push(imgcodecs::IMWRITE_JPEG_QUALITY);
-        params.push(75);
-        if imgcodecs::imencode(".jpg", &frame, &mut encoded_buf, &params).unwrap_or(false) {
-            let _ = stream_tx_cam1.send(encoded_buf.to_vec());
-        }
+        write_num_objects_detected_to_frame(&mut frame, active_tracks.len());
 
-        // F. Non-blocking cooldown logic for ALPR
-        if is_alpr_active {
-            if last_alpr_trigger.elapsed() >= Duration::from_secs(3) {
-                is_alpr_active = false;
-                println!("Camera 1: ALPR Cooldown finished.");
+        for track in active_tracks {
+            //  Rebuild the TrackedObject using the smoothed ByteTrack coordinates and persistent ID.
+            let vehicle = TrackedObject {
+                id: track.track_id as usize,
+                class_id: track.class_id as usize,
+                x: track.tlwh[0] as i32,
+                y: track.tlwh[1] as i32,
+                width: track.tlwh[2] as i32,
+                height: track.tlwh[3] as i32,
+                confidence: track.score,
+                class_name: COCO_NAMES[track.class_id as usize].to_string(),
+            };
+
+            process_vehicle_object(&mut frame, &vehicle, &current_config, vision_system.clone());
+
+            // E. Send the frame to Web Server Broadcast Hub
+            let mut encoded_buf = Vector::<u8>::new();
+            let mut params = Vector::<i32>::new(); // Default compression params
+            params.push(imgcodecs::IMWRITE_JPEG_QUALITY);
+            params.push(75);
+            if imgcodecs::imencode(".jpg", &frame, &mut encoded_buf, &params).unwrap_or(false) {
+                let _ = stream_tx_cam1.send(encoded_buf.to_vec());
+            }
+
+            // F. Non-blocking cooldown logic for ALPR
+            if is_alpr_active {
+                if last_alpr_trigger.elapsed() >= Duration::from_secs(3) {
+                    is_alpr_active = false;
+                    println!("Camera 1: ALPR Cooldown finished.");
+                }
             }
         }
     }
@@ -169,7 +211,10 @@ fn draw_object_bounding_box(frame: &mut Mat, object: &TrackedObject, current_con
 
     let _ = opencv::imgproc::rectangle(frame, rect, box_color, 2, 1, 0);
 
-    let label = format!("{}- {}x{} (Area:{})", object.class_name, object.width, object.height, box_area);
+    let label = format!(
+        "{}- {}x{} (Area:{})",
+        object.class_name, object.width, object.height, box_area
+    );
     let _ = opencv::imgproc::put_text(
         frame,
         &label,
@@ -183,20 +228,75 @@ fn draw_object_bounding_box(frame: &mut Mat, object: &TrackedObject, current_con
     );
 }
 
-fn process_vehicle_object(frame: &mut Mat, object: &TrackedObject, current_config: &AppConfig) {
+fn process_vehicle_object(
+    frame: &mut Mat,
+    object: &TrackedObject,
+    current_config: &AppConfig,
+    vision_system: Arc<Mutex<inference::hailo8::Hailo8Manager>>,
+) {
+    // 1. Draw the overview bounding box for the stream
     draw_object_bounding_box(frame, object, current_config);
+    let box_area: f64 = object.width as f64 * object.height as f64;
+
+    // if box is "big enough", extract the vehicle and detect the license plate, extract the region, then do OCR.
+    if box_area > current_config.min_area_lpd {
+        if let Some(mut cropped_vehicle) = extract_roi_from_frame(frame, object, current_config) {
+            if let Some(plate_object) = vision_system.lock().unwrap().locate_plate(&cropped_vehicle)
+            {
+                if let Some(cropped_plate) =
+                    extract_roi_from_frame(&mut cropped_vehicle, &plate_object, current_config)
+                {
+                    if let Some(plate_text) =
+                        vision_system.lock().unwrap().recognize_text(&cropped_plate)
+                    {
+                        println!("Plate text: {}", plate_text);
+                    }
+                }
+            }
+        }
+    }
 }
 
-fn write_num_objects_detected_to_frame(frame: &mut Mat, num_objects: usize){
+fn extract_roi_from_frame(
+    frame: &mut Mat,
+    object: &TrackedObject,
+    current_config: &AppConfig,
+) -> Option<Mat> {
+    // 2. Calculate the safe boundaries to prevent out-of bounds memory panics.
+    let frame_cols = frame.cols();
+    let frame_rows = frame.rows();
+
+    // Esnure x and y don't drop below 0
+    let safe_x = object.x.max(0);
+    let safe_y = object.y.max(0);
+
+    let safe_width = object.width.min(frame_cols - safe_x);
+    let safe_height = object.height.min(frame_rows - safe_y);
+
+    // 3. Only proceed if we have a mathematically valid box
+    if safe_width > 0 && safe_height > 0 {
+        let roi = Rect::new(safe_x, safe_y, safe_width, safe_height);
+
+        //4. Extract the cropped vehicle image into a new Mat
+        if let Ok(roi_box) = Mat::roi(frame, roi) {
+            if let Ok(cropped_vehicle) = roi_box.try_clone() {
+                return Some(cropped_vehicle);
+            }
+        }
+    }
+    None
+}
+
+fn write_num_objects_detected_to_frame(frame: &mut Mat, num_objects: usize) {
     let count_label = format!("Total Objects: {}", num_objects);
     let _ = opencv::imgproc::put_text(
         frame,
         &count_label,
         Point::new(20, 80), // Placed just below the FPS counter (which is at Y:40)
         opencv::imgproc::FONT_HERSHEY_SIMPLEX,
-        1.0, // Font scale
+        1.0,                                 // Font scale
         Scalar::new(255.0, 0.0, 255.0, 0.0), // Magenta text color
-        2,   // Thickness
+        2,                                   // Thickness
         opencv::imgproc::LINE_8,
         false,
     );

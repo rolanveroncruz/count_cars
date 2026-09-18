@@ -10,15 +10,17 @@ use std::path::Path;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     pub min_box_area: f64, //  1. Minimum bounding box area to start tracking an object.
-    pub confidence: f32,   //  2. YOLO confidence threshold for vehicle detection
-    pub alpr_trigger_area: f64, // 2. Minimum bounding box area to trigger ALPR/OCR capture
-    pub gate_line_y: i32,   // 4. Y-coordinate pixel line across for gate crossing detection.
+    pub min_area_lpd: f64, // 2.  Minimum bounding box are to attempt license plate detection.
+    pub confidence: f32,   //  3. YOLO confidence threshold for vehicle detection
+    pub alpr_trigger_area: f64, // 4. Minimum bounding box area to trigger ALPR/OCR capture
+    pub gate_line_y: i32,   // 5. Y-coordinate pixel line across for gate crossing detection.
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             min_box_area: 3000.0,
+            min_area_lpd: 3000.0,
             confidence: 0.45,
             alpr_trigger_area: 25000.0,
             gate_line_y: 600,
