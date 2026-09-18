@@ -35,6 +35,19 @@ pub struct Hailo8Manager {
     vehicle_output_vstreams: Vec<hailo_output_vstream>,
     vehicle_output_sizes: Vec<usize>,
     vehicle_is_nms: bool,
+    // Plate YOLO pipeline (configured at init, reused per-frame)
+    plate_network_group: hailo_configured_network_group,
+    plate_input_vstream: hailo_input_vstream,
+    plate_input_size: usize,
+    plate_output_vstreams: Vec<hailo_output_vstream>,
+    plate_output_sizes: Vec<usize>,
+    plate_is_nms: bool,
+    // OCR/LPRNet pipeline (configured at init, reused per-frame)
+    ocr_network_group: hailo_configured_network_group,
+    ocr_input_vstream: hailo_input_vstream,
+    ocr_input_size: usize,
+    ocr_output_vstreams: Vec<hailo_output_vstream>,
+    ocr_output_sizes: Vec<usize>,
 }
 
 // We must explicitly tell Rust it is safe to move these C-pointers across thread boundaries
@@ -206,12 +219,27 @@ impl Hailo8Manager {
         let mut ocr_hef: hailo_hef = ptr::null_mut();
 
 
-        let mut network_group: hailo_configured_network_group = ptr::null_mut();
-        let mut input_vstream: hailo_input_vstream = ptr::null_mut();
-        let mut input_size: usize = 0;
-        let mut output_vstream_ptrs: Vec<hailo_output_vstream> = Vec::new();
-        let mut output_sizes: Vec<usize> = Vec::new();
-        let mut is_nms = false;
+        let mut vehicle_network_group: hailo_configured_network_group = ptr::null_mut();
+        let mut vehicle_input_vstream: hailo_input_vstream = ptr::null_mut();
+        let mut vehicle_input_size: usize = 0;
+        let mut vehicle_output_vstreams: Vec<hailo_output_vstream> = Vec::new();
+        let mut vehicle_output_sizes: Vec<usize> = Vec::new();
+        let mut vehicle_is_nms = false;
+
+        let mut plate_network_group: hailo_configured_network_group = ptr::null_mut();
+        let mut plate_input_vstream: hailo_input_vstream = ptr::null_mut();
+        let mut plate_input_size: usize = 0;
+        let mut plate_output_vstreams: Vec<hailo_output_vstream> = Vec::new();
+        let mut plate_output_sizes: Vec<usize> = Vec::new();
+        let mut plate_is_nms = false;
+
+
+        let mut ocr_network_group: hailo_configured_network_group = ptr::null_mut();
+        let mut ocr_input_vstream: hailo_input_vstream = ptr::null_mut();
+        let mut ocr_input_size: usize = 0;
+        let mut ocr_output_vstreams: Vec<hailo_output_vstream> = Vec::new();
+        let mut ocr_output_sizes: Vec<usize> = Vec::new();
+
 
         let vdevice = Hailo8Manager::initialize_vdevice();
         println!("Step 3: Create the three HEF files.");
@@ -223,12 +251,12 @@ impl Hailo8Manager {
 
         unsafe {
             // ========================================================
-            // ✅ ADDED: CONFIGURE VEHICLE YOLO PIPELINE
+            // ✅ CONFIGURE VEHICLE YOLO PIPELINE
             // ========================================================
 
             println!("Step 4: Configure the Vehicle HEF on the VDevice");
             //4. Configure the vehicle HEF on the VDevice
-            Self::configure_hef_on_vdevice(vehicle_hef, vdevice, &mut network_group, "vehicle");
+            Self::configure_hef_on_vdevice(vehicle_hef, vdevice, &mut vehicle_network_group, "vehicle");
 
             // 5. Query all vstream infos from the HEF (HailoRT 4.23.0 API)
             let mut all_vstream_infos: [hailo_vstream_info_t; HAILO_MAX_STREAMS_COUNT as usize] = std::mem::zeroed();
@@ -242,18 +270,18 @@ impl Hailo8Manager {
             println!("Vehicle HEF: {} input(s), {} output(s)", h2d_infos.len(), d2h_infos.len());
 
             // 6. Build input vstream params (HailoRT 4.23.0 API)
-            Self::create_input_vstream(network_group, &mut input_vstream);
-            output_vstream_ptrs = Self::create_output_vstream(network_group, &d2h_infos);
+            Self::create_input_vstream(vehicle_network_group, &mut vehicle_input_vstream);
+            vehicle_output_vstreams= Self::create_output_vstream(vehicle_network_group, &d2h_infos);
 
             // 9. Create output vstreams
             // 10. Compute input size and output sizes for buffer allocation
             let mut expected_in_size:usize = 0;
-            if hailo_get_input_vstream_frame_size(input_vstream, &mut expected_in_size) != HAILO_SUCCESS {
+            if hailo_get_input_vstream_frame_size(vehicle_input_vstream, &mut expected_in_size) != HAILO_SUCCESS {
                 panic!("Failed to get vehicle input vstream frame size");
             }
-            input_size = expected_in_size;
+            vehicle_input_size = expected_in_size;
 
-            is_nms = false;
+            vehicle_is_nms = false;
 
             for i in 0..d2h_infos.len(){
                 let order = d2h_infos[i].format.order;
@@ -265,31 +293,79 @@ impl Hailo8Manager {
                     _ => println!("Vehicle Output {} Format: RAW TENSOR (Enum ID: {})", i, order),
                 }
                 if order == HAILO_FORMAT_ORDER_HAILO_NMS_BY_CLASS{
-                    is_nms = true;
+                    vehicle_is_nms = true;
                 }
                 let mut expected_out_size:usize = 0;
-                if hailo_get_output_vstream_frame_size(output_vstream_ptrs[i], &mut expected_out_size) != HAILO_SUCCESS {
+                if hailo_get_output_vstream_frame_size(vehicle_output_vstreams[i], &mut expected_out_size) != HAILO_SUCCESS {
                     panic!("Failed to get vehicle output vstream frame size");
                 }
-                output_sizes.push(expected_out_size);
+                vehicle_output_sizes.push(expected_out_size);
             }
-            println!("Vehicle input size: {},  NMS output: {}", input_size, is_nms);
+            println!("Vehicle input size: {},  NMS output: {}", vehicle_input_size, vehicle_is_nms);
+            // ========================================================
+            // ✅ CONFIGURE PLATE YOLO PIPELINE
+            // ========================================================
+
+            Self::configure_hef_on_vdevice(plate_hef, vdevice, &mut plate_network_group, "plate");
+
+            // 5. Query all vstream infos from the HEF (HailoRT 4.23.0 API)
+            let mut all_vstream_infos: [hailo_vstream_info_t; HAILO_MAX_STREAMS_COUNT as usize] = std::mem::zeroed();
+            let mut num_all_vstreams: usize = HAILO_MAX_STREAMS_COUNT as usize;
+            Self::get_all_vstream_infos(plate_hef, &mut all_vstream_infos, &mut num_all_vstreams);
+
+            // Separate into input (H2D) and output (D2H) infos
+            let mut h2d_infos: Vec<hailo_vstream_info_t> = Vec::new();
+            let mut d2h_infos: Vec<hailo_vstream_info_t> = Vec::new();
+            Self::separate_vstream_infos(&mut all_vstream_infos, num_all_vstreams, &mut h2d_infos, &mut d2h_infos);
+            println!("PLATE HEF: {} input(s), {} output(s)", h2d_infos.len(), d2h_infos.len());
+
+            // 6. Build input vstream params (HailoRT 4.23.0 API)
+            Self::create_input_vstream(plate_network_group, &mut plate_input_vstream);
+            plate_output_vstreams = Self::create_output_vstream(plate_network_group, &d2h_infos);
+            // ========================================================
+            // ✅ CONFIGURE OCR LPRNET PIPELINE
+            // ========================================================
+            Self::configure_hef_on_vdevice(ocr_hef, vdevice, &mut ocr_network_group, "ocr");
+
+            // 5. Query all vstream infos from the HEF (HailoRT 4.23.0 API)
+            let mut all_vstream_infos: [hailo_vstream_info_t; HAILO_MAX_STREAMS_COUNT as usize] = std::mem::zeroed();
+            let mut num_all_vstreams: usize = HAILO_MAX_STREAMS_COUNT as usize;
+            Self::get_all_vstream_infos(ocr_hef, &mut all_vstream_infos, &mut num_all_vstreams);
+
+            // Separate into input (H2D) and output (D2H) infos
+            let mut h2d_infos: Vec<hailo_vstream_info_t> = Vec::new();
+            let mut d2h_infos: Vec<hailo_vstream_info_t> = Vec::new();
+            Self::separate_vstream_infos(&mut all_vstream_infos, num_all_vstreams, &mut h2d_infos, &mut d2h_infos);
+            println!("OCR HEF: {} input(s), {} output(s)", h2d_infos.len(), d2h_infos.len());
+
+            // 6. Build input vstream params (HailoRT 4.23.0 API)
+            Self::create_input_vstream(ocr_network_group, &mut ocr_input_vstream);
+            ocr_output_vstreams = Self::create_output_vstream(ocr_network_group, &d2h_infos);
         } // unsafe
-
         println!("Hailo-8 Manager successfully loaded all 3 models!");
-
 
         Self {
             vdevice,
             vehicle_hef,
             plate_hef,
             ocr_hef,
-            vehicle_network_group: network_group,
-            vehicle_input_vstream: input_vstream,
-            vehicle_input_size: input_size,
-            vehicle_output_vstreams: output_vstream_ptrs,
-            vehicle_output_sizes: output_sizes,
-            vehicle_is_nms: is_nms,
+            vehicle_network_group,
+            vehicle_input_vstream,
+            vehicle_input_size,
+            vehicle_output_vstreams,
+            vehicle_output_sizes,
+            vehicle_is_nms,
+            plate_network_group,
+            plate_input_vstream,
+            plate_input_size,
+            plate_output_vstreams,
+            plate_output_sizes,
+            plate_is_nms,
+            ocr_network_group,
+            ocr_input_vstream,
+            ocr_input_size,
+            ocr_output_vstreams,
+            ocr_output_sizes,
         }
     }
 }
