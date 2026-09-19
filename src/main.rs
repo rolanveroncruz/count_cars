@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hailo8_manager = Arc::new(Mutex::new(inference::hailo8::Hailo8Manager::new(
         "src/inference/models/yolov8n.hef",
           "src/inference/models/tiny_yolov4_license_plates.hef",
-           "src/inference/models/lprnet.hef",
+           "src/inference/models/yolo8vn_lp_ocr.hef",
     )));
     // 1e. Spawn Camera 2: The On-demand ALPR worker
     tokio::spawn(async move {

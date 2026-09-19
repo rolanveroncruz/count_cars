@@ -15,5 +15,6 @@ chrono = "0.4.45"
 ort = "2.0.0-rc.13"
 ndarray = "0.17.2"
 trackforge = "0.4.0"
+image = "0.25.10"
 [build-dependencies]
 bindgen="0.73.2"

@@ -8,6 +8,8 @@ pub mod hailo8;
 #[allow(unused)]
 #[allow(suspicious_runtime_symbol_definitions)]
 pub mod bindings;
+mod tiny_yolov4;
+mod yolov8_lp;
 
 use std::sync::{Arc, Mutex};
 use opencv::core::Mat;
@@ -24,10 +26,17 @@ pub struct TrackedObject {
     pub width: i32,
     pub height: i32,
 }
+pub struct DetectedLicensePlate{
+    pub confidence: f32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
 
 pub trait CountCarsIntelligence: Send{
     fn detect_vehicles(&mut self, frame: &Mat) -> Vec<TrackedObject>;
-    fn locate_plate(&mut self, cropped_vehicle: &Mat) -> Option<TrackedObject>;
+    fn locate_plate(&mut self, cropped_vehicle: &Mat) -> Option<DetectedLicensePlate>;
     fn recognize_text(&mut self, cropped_plate: &Mat) -> Option<String>;
 }
 
@@ -37,7 +46,7 @@ impl<T: CountCarsIntelligence> CountCarsIntelligence for Arc<Mutex<T>> {
         self.lock().unwrap().detect_vehicles(frame)
     }
 
-    fn locate_plate(&mut self, cropped_vehicle: &Mat) -> Option<TrackedObject> {
+    fn locate_plate(&mut self, cropped_vehicle: &Mat) -> Option<DetectedLicensePlate> {
         self.lock().unwrap().locate_plate(cropped_vehicle)
     }
 

@@ -18,7 +18,7 @@ use crate::config::AppConfig;
 use crate::frame_src::FrameSource;
 use crate::inference;
 use crate::inference::hailo8::COCO_NAMES;
-use crate::inference::{CountCarsIntelligence, TrackedObject};
+use crate::inference::{CountCarsIntelligence, DetectedLicensePlate, TrackedObject};
 
 //************************
 //*
@@ -240,12 +240,23 @@ fn process_vehicle_object(
 
     // if box is "big enough", extract the vehicle and detect the license plate, extract the region, then do OCR.
     if box_area > current_config.min_area_lpd {
-        if let Some(mut cropped_vehicle) = extract_roi_from_frame(frame, object, current_config) {
-            if let Some(plate_object) = vision_system.lock().unwrap().locate_plate(&cropped_vehicle)
-            {
+        if let Some(mut cropped_vehicle) = extract_vehicle_roi_from_frame(frame, object, current_config) {
+            println!("Vehicle ROI extracted");
+            let plate_object = {
+                println!("About to lock for plate detection");
+                let mut manager = vision_system.lock().unwrap();
+                println!("Hailo8Manager locked for plate detection");
+                let result = manager.locate_plate(&cropped_vehicle);
+                println!("Plate detection finished; releasing Hailo8Manager lock");
+                result
+            };
+            if let Some(plate_object) = plate_object {
+                println!("Plate Object extracted");
                 if let Some(cropped_plate) =
-                    extract_roi_from_frame(&mut cropped_vehicle, &plate_object, current_config)
+                    extract_plate_roi_from_frame(&mut cropped_vehicle, &plate_object)
                 {
+                    println!("Plate ROI extracted");
+                    println!("About to lock Hailo8Manager for OCR");
                     if let Some(plate_text) =
                         vision_system.lock().unwrap().recognize_text(&cropped_plate)
                     {
@@ -257,7 +268,7 @@ fn process_vehicle_object(
     }
 }
 
-fn extract_roi_from_frame(
+fn extract_vehicle_roi_from_frame(
     frame: &mut Mat,
     object: &TrackedObject,
     current_config: &AppConfig,
@@ -286,6 +297,42 @@ fn extract_roi_from_frame(
     }
     None
 }
+
+fn extract_plate_roi_from_frame(
+    frame: &mut Mat,
+    object: &DetectedLicensePlate,
+)-> Option<Mat> {
+    let frame_cols = frame.cols();
+    let frame_rows = frame.rows();
+
+    // Ensure x and y don't drop below 0.
+    let safe_x = object.x.max(0);
+    let safe_y = object.y.max(0);
+
+    // Ensure width and height don't extend beyond the frame.
+    let safe_width = object.width.min(frame_cols - safe_x);
+    let safe_height = object.height.min(frame_rows - safe_y);
+
+    // Only proceed if we have a mathematically valid box.
+    if safe_width > 0 && safe_height > 0 {
+        let roi = Rect::new(
+            safe_x,
+            safe_y,
+            safe_width,
+            safe_height,
+        );
+
+        if let Ok(roi_box) = Mat::roi(frame, roi) {
+            if let Ok(cropped_plate) = roi_box.try_clone() {
+                return Some(cropped_plate);
+            }
+        }
+    }
+
+    None
+
+}
+
 
 fn write_num_objects_detected_to_frame(frame: &mut Mat, num_objects: usize) {
     let count_label = format!("Total Objects: {}", num_objects);
